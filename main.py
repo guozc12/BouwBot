@@ -21,6 +21,7 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from publish_to_github import add_new_house
+from selenium.webdriver.common.keys import Keys
 
 # 加载环境变量
 load_dotenv()
@@ -103,8 +104,23 @@ class MakelaarslandProcessor:
 
         # 2. 地址、价格、面积、房间数、经纪人
         info_text = soup.get_text()
-        address = re.search(r'\d{4}[A-Z]{2} [A-Za-z ]+', info_text)
-        address = address.group(0) if address else ''
+        # 提取街道、门牌、邮编、城市
+        street = ''
+        house_number = ''
+        postcode = ''
+        city = ''
+        # 匹配如"H. Diemerstraat 37, 3555GR Utrecht"
+        m = re.search(r'([A-Za-z\.\-\'\s]+)\s(\d+[A-Za-z]?),?\s*(\d{4}[A-Z]{2})\s+([A-Za-z ]+)', info_text)
+        if m:
+            street = m.group(1).strip()
+            house_number = m.group(2).strip()
+            postcode = m.group(3).strip()
+            city = m.group(4).strip()
+            full_address = f"{street} {house_number}, {postcode} {city}"
+        else:
+            # 兜底用原有逻辑
+            full_address = ''
+        address = full_address or (re.search(r'\d{4}[A-Z]{2} [A-Za-z ]+', info_text).group(0) if re.search(r'\d{4}[A-Z]{2} [A-Za-z ]+', info_text) else '')
         price = re.search(r'€ [\d\.,]+ k\.k\.', info_text)
         price = price.group(0) if price else ''
         size_rooms = re.search(r'\d+ m² • \d+ m² • \d+ kamers', info_text)
@@ -139,8 +155,48 @@ class MakelaarslandProcessor:
         house_info['details_sections'] = details_sections
         house_info['agent_info'] = agent_info
 
+        # 自动提取重要参数
+        def extract_param(sections, keys):
+            for section in sections.values():
+                for k, v in section.items():
+                    if k in keys:
+                        return v
+            return ''
+        param_keys = {
+            'Woonoppervlakte': ['Woonoppervlakte', 'Oppervlakte', 'Gebruiksoppervlakte'],
+            'Inhoud': ['Inhoud'],
+            'Bouwjaar': ['Bouwjaar'],
+            'Aantal kamers': ['Aantal kamers', 'Kamers'],
+            'Aantal badkamers': ['Aantal badkamers', 'Badkamers'],
+            'Aantal slaapkamers': ['Aantal slaapkamers', 'Slaapkamers'],
+            'Energielabel': ['Energielabel', 'Energielabel woning', 'Energie label']
+        }
+        important_info = {}
+        for key, aliases in param_keys.items():
+            val = extract_param(details_sections, aliases)
+            important_info[key] = val
+        # 增强：从 'Aantal kamers' 提取 'Aantal slaapkamers'
+        if not important_info['Aantal slaapkamers']:
+            kamers_val = important_info.get('Aantal kamers', '')
+            m = re.search(r'(\d+)\s*slaapkamers', kamers_val)
+            if m:
+                important_info['Aantal slaapkamers'] = m.group(1)
+        # 增强：从 Energieklasse 提取 Energielabel
+        if not important_info['Energielabel']:
+            energielabel_section = details_sections.get('Energielabel', {})
+            if isinstance(energielabel_section, dict):
+                energieklasse = energielabel_section.get('Energieklasse')
+                if energieklasse:
+                    important_info['Energielabel'] = energieklasse
+        print("details_sections:", json.dumps(details_sections, indent=2, ensure_ascii=False))
+        print("important_info:", important_info)
+        house_info['important_info'] = important_info
+
         # 获取到最近火车站的距离
         house_info['nearest_station'] = self.get_nearest_station(house_info['address'])
+
+        # 获取WOZ估值
+        house_info['woz_info'] = self.get_woz_info(full_address)
 
         # 新增：自动发布到GitHub Pages，获取filename
         filename = add_new_house(house_info)
@@ -367,6 +423,138 @@ class MakelaarslandProcessor:
                 to=recipient
             )
             print("消息已发送，Twilio SID:", message.sid, "to", recipient)
+
+    def get_woz_info(self, address):
+        """
+        自动从 wozwaardeloket.nl 查询房屋的 WOZ 估值。
+        :param address: 完整地址字符串
+        :return: 估值表格HTML字符串或空字符串
+        """
+        from selenium.webdriver.common.by import By
+        from selenium.webdriver.support.ui import WebDriverWait
+        from selenium.webdriver.support import expected_conditions as EC
+        import time
+        import re
+
+        def format_address(addr):
+            m = re.match(r'(.+\d+)\s*,\s*(\d{4}[A-Z]{2})\s+([A-Za-z ]+)', addr)
+            if m:
+                return f"{m.group(1).strip()}, {m.group(2).strip()} {m.group(3).strip()}"
+            print(f"[WOZ] 地址格式不正确，未包含街道和门牌: {addr}")
+            return ''
+        address = format_address(address)
+        if not address:
+            print("[WOZ] 未能生成正确的查询地址，跳过 WOZ 查询。")
+            return ''
+        print(f"[WOZ] 查询地址: {address}")
+
+        chrome_options = Options()
+        chrome_options.add_argument('--headless')
+        chrome_options.add_argument('--no-sandbox')
+        chrome_options.add_argument('--disable-dev-shm-usage')
+        chromedriver_path = ChromeDriverManager().install()
+        if not chromedriver_path.endswith("chromedriver.exe"):
+            chromedriver_path = os.path.join(os.path.dirname(chromedriver_path), "chromedriver.exe")
+        driver = webdriver.Chrome(service=Service(chromedriver_path), options=chrome_options)
+        woz_table_html = ""
+        try:
+            print("[WOZ] 打开网站...")
+            driver.get("https://www.wozwaardeloket.nl/")
+            wait = WebDriverWait(driver, 30)
+            try:
+                print("[WOZ] 检查弹窗...")
+                modal = wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, ".modal__card")))
+                try:
+                    print("[WOZ] 尝试点击 Ga verder 按钮...")
+                    ga_verder_btn = modal.find_element(By.CSS_SELECTOR, ".btn, button")
+                    ga_verder_btn.click()
+                    print("[WOZ] 已点击 Ga verder 按钮")
+                except Exception:
+                    print("[WOZ] 尝试点击右上角关闭按钮...")
+                    close_btn = modal.find_element(By.CSS_SELECTOR, "button")
+                    close_btn.click()
+                    print("[WOZ] 已点击关闭按钮")
+                wait.until(EC.invisibility_of_element_located((By.CSS_SELECTOR, ".modal__card")))
+                time.sleep(0.5)
+            except Exception as e:
+                print(f"[WOZ] 没有弹窗或弹窗处理异常: {e}")
+            # 健壮地查找输入框
+            try:
+                print("[WOZ] 等待输入框可点击...")
+                wait.until(EC.presence_of_element_located((By.TAG_NAME, "body")))
+                input_box = wait.until(EC.element_to_be_clickable((By.ID, "ggcSearchInput")))
+                input_box.click()
+                print("[WOZ] 输入框已点击")
+            except Exception as e:
+                print(f"[WOZ] 查找输入框失败: {e}")
+                with open("woz_inputbox_fail.html", "w", encoding="utf-8") as f:
+                    f.write(driver.page_source)
+                driver.quit()
+                return "WOZ页面结构异常，未找到输入框"
+            time.sleep(0.5)
+            input_box.clear()
+            for char in address:
+                input_box.send_keys(char)
+                time.sleep(0.05)
+            print(f"[WOZ] 地址已输入: {input_box.get_attribute('value')}")
+            time.sleep(0.5)
+            try:
+                search_button = driver.find_element(By.CSS_SELECTOR, "button[type='submit'], .search-button")
+                search_button.click()
+                print("[WOZ] 已点击搜索按钮")
+            except:
+                input_box.send_keys(Keys.ENTER)
+                print("[WOZ] 已按回车键搜索")
+            time.sleep(5)
+            print("[WOZ] 当前页面URL:", driver.current_url)
+            print("[WOZ] 页面标题:", driver.title)
+            with open("woz_debug.html", "w", encoding="utf-8") as f:
+                f.write(driver.page_source)
+            print("[WOZ] 已保存页面源码到 woz_debug.html")
+            # 直接查找 WOZ 行
+            print("[WOZ] 直接查找 WOZ 行 tr.waarden-row ...")
+            time.sleep(2)
+            # 先在主页面查找
+            rows = driver.find_elements(By.CSS_SELECTOR, "tr.waarden-row")
+            print(f"[WOZ] 主页面找到的行数: {len(rows)}")
+            # 如果主页面没找到，检查iframe
+            if len(rows) == 0:
+                iframes = driver.find_elements(By.TAG_NAME, "iframe")
+                print(f"[WOZ] 页面中的iframe数量: {len(iframes)}")
+                for idx, iframe in enumerate(iframes):
+                    driver.switch_to.frame(iframe)
+                    try:
+                        # 显式等待iframe内的动态内容
+                        rows = WebDriverWait(driver, 8).until(
+                            lambda d: d.find_elements(By.CSS_SELECTOR, "tr.waarden-row")
+                        )
+                        print(f"[WOZ] 在iframe {idx} 里找到的行数: {len(rows)}")
+                        if len(rows) > 0:
+                            break
+                    except Exception as e:
+                        print(f"[WOZ] 在iframe {idx} 等待 WOZ 行超时: {e}")
+                        rows = []
+                    finally:
+                        driver.switch_to.default_content()
+            if rows:
+                woz_table_html = '<table style="width:100%;border-collapse:collapse;"><thead><tr><th>Peildatum</th><th>WOZ-waarde</th></tr></thead><tbody>'
+                for row in rows:
+                    try:
+                        date = row.find_element(By.CSS_SELECTOR, "td.wozwaarde-datum").text.strip()
+                        value = row.find_element(By.CSS_SELECTOR, "td.wozwaarde-waarde").text.strip()
+                        woz_table_html += f"<tr><td>{date}</td><td>{value}</td></tr>"
+                    except Exception as e:
+                        continue
+                woz_table_html += "</tbody></table>"
+                print("[WOZ] 提取到的WOZ表格HTML:\n", woz_table_html)
+            else:
+                woz_table_html = "Geen WOZ informatie beschikbaar"
+        except Exception as e:
+            print(f"[WOZ] 查询失败: {e}")
+            woz_table_html = ""
+        finally:
+            driver.quit()
+        return woz_table_html
 
 if __name__ == "__main__":
     processor = MakelaarslandProcessor()

@@ -14,49 +14,22 @@ HOUSES_JSON = os.path.join(REPO_PATH, 'houses.json')  # 存储所有房源信息
 # 1. 渲染房源详情页
 
 def render_house_page(house, filename):
-    # 解析详情文本，提取重要信息和其他信息
+    # 直接使用 main.py 传递的 important_info
+    important_info = house.get('important_info', {})
+    house['important_info'] = important_info
+    # 其他信息保留原逻辑
     details = house.get('details', '')
-    important_info = {}
     other_info = {}
-    
-    # 定义重要信息的键值对模式
-    important_patterns = {
-        'Woonoppervlakte': r'Woonoppervlakte:\s*([^\n]+)',
-        'Perceeloppervlakte': r'Perceeloppervlakte:\s*([^\n]+)',
-        'Aantal kamers': r'Aantal kamers:\s*([^\n]+)',
-        'Aantal slaapkamers': r'Aantal slaapkamers:\s*([^\n]+)',
-        'Bouwjaar': r'Bouwjaar:\s*([^\n]+)',
-        'Energielabel': r'Energielabel:\s*([^\n]+)',
-        'Type woning': r'Type woning:\s*([^\n]+)',
-        'Type bouw': r'Type bouw:\s*([^\n]+)',
-        'Ligging': r'Ligging:\s*([^\n]+)',
-        'Tuin': r'Tuin:\s*([^\n]+)',
-        'Garage': r'Garage:\s*([^\n]+)',
-        'Parkeren': r'Parkeren:\s*([^\n]+)',
-    }
-    
-    # 提取重要信息
-    for key, pattern in important_patterns.items():
-        match = re.search(pattern, details, re.IGNORECASE)
-        if match:
-            important_info[key] = match.group(1).strip()
-    
     # 将剩余信息按段落分类
     paragraphs = [p.strip() for p in details.split('\n') if p.strip()]
     current_section = None
-    
     for para in paragraphs:
-        # 检查是否是新的段落标题
         if ':' in para and len(para.split(':')) == 2:
             current_section = para
             other_info[current_section] = []
         elif current_section:
             other_info[current_section].append(para)
-    
-    # 更新 house 字典，添加解析后的信息
-    house['important_info'] = important_info
     house['other_info'] = other_info
-    
     # 读取并渲染模板
     with open(HOUSE_TEMPLATE, encoding='utf-8') as f:
         template = Template(f.read())
