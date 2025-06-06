@@ -35,7 +35,12 @@ class MakelaarslandProcessor:
         self.twilio_account_sid = os.getenv('TWILIO_ACCOUNT_SID')
         self.twilio_auth_token = os.getenv('TWILIO_AUTH_TOKEN')
         self.twilio_phone_number = os.getenv('TWILIO_PHONE_NUMBER')
-        self.whatsapp_number = os.getenv('WHATSAPP_NUMBER')
+        # 支持多个收件人
+        recipients = os.getenv('WHATSAPP_RECIPIENTS', '')
+        self.whatsapp_recipients = [
+            r.strip() if r.strip().startswith('whatsapp:') else f'whatsapp:{r.strip()}'
+            for r in recipients.split(',') if r.strip()
+        ]
         
         # 初始化 Google Maps 客户端
         self.gmaps = Client(key=self.google_maps_api_key)
@@ -108,8 +113,7 @@ class MakelaarslandProcessor:
         agent = agent.group(0) if agent else ''
 
         # 3. 图片
-        img_tag = soup.find('img', alt="Foto woning")
-        img_url = img_tag['src'] if img_tag else ''
+        img_url = ''
 
         # 4. "Bekijk details"按钮
         btn = soup.find('a', string=lambda s: s and 'Bekijk details' in s)
@@ -121,7 +125,7 @@ class MakelaarslandProcessor:
             'price': price,
             'size_rooms': size_rooms,
             'agent': agent,
-            'images': [img_url] if img_url else [],
+            'images': [],
             'url': btn_url,
             'details': '',
             'nearest_station': {}
@@ -136,10 +140,11 @@ class MakelaarslandProcessor:
         # 获取到最近火车站的距离
         house_info['nearest_station'] = self.get_nearest_station(house_info['address'])
 
-        # 发送WhatsApp消息
+        # 新增：自动发布到GitHub Pages，获取filename
+        filename = add_new_house(house_info)
+        house_info['filename'] = filename
+        # 发送WhatsApp消息（此时filename已就绪）
         self.send_whatsapp(house_info)
-        # 新增：自动发布到GitHub Pages
-        add_new_house(house_info)
     
     def get_house_details(self, url):
         """获取房屋详细信息（自动登录+抓取详情页所有文本和图片）"""
@@ -219,20 +224,22 @@ class MakelaarslandProcessor:
     def send_whatsapp(self, house_info):
         print("正在尝试发送 WhatsApp 消息...")
         print("from_参数:", f'whatsapp:{self.twilio_phone_number}')
-        print("to参数:", f'whatsapp:{self.whatsapp_number}')
+        print("收件人列表:", self.whatsapp_recipients)
         station_info = house_info.get('nearest_station', {}) or {}
         station_text = ''
         if station_info:
             station_text = f"\nNearest station: {station_info.get('station_name', '')}\nWalking time: {station_info.get('walking_time', '')}\nDistance: {station_info.get('distance', '')}"
-        # 拼接GitHub Pages链接
         github_base_url = "https://guozc12.github.io/makelaarsland-houses/"
         page_url = github_base_url + house_info.get('filename', '')
-        message = self.twilio_client.messages.create(
-            from_=f'whatsapp:{self.twilio_phone_number}',
-            body=f"New house alert!\nTitle: {house_info['title']}\nPrice: {house_info['price']}\nAddress: {house_info['address']}\nView details: {page_url}{station_text}",
-            to=f'whatsapp:{self.whatsapp_number}'
-        )
-        print("消息已发送，Twilio SID:", message.sid)
+        body = f"New house alert!\nTitle: {house_info['title']}\nPrice: {house_info['price']}\nAddress: {house_info['address']}\nPage: {page_url}{station_text}"
+        for recipient in self.whatsapp_recipients:
+            print("to参数:", recipient)
+            message = self.twilio_client.messages.create(
+                from_=f'whatsapp:{self.twilio_phone_number}',
+                body=body,
+                to=recipient
+            )
+            print("消息已发送，Twilio SID:", message.sid, "to", recipient)
 
 if __name__ == "__main__":
     processor = MakelaarslandProcessor()

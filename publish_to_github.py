@@ -5,7 +5,7 @@ from jinja2 import Template
 import subprocess
 
 # 配置
-REPO_PATH = os.path.abspath('.')  # 仓库根目录
+REPO_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), 'makelaarsland-houses'))  # 指向子仓库目录
 HOUSE_TEMPLATE = os.path.join(REPO_PATH, 'house_template.html')
 INDEX_TEMPLATE = os.path.join(REPO_PATH, 'index_template.html')
 HOUSES_JSON = os.path.join(REPO_PATH, 'houses.json')  # 存储所有房源信息
@@ -58,6 +58,7 @@ def add_new_house(house_info):
     render_index_page(houses)
     # 推送到GitHub
     git_push(f"add house: {house_info.get('title', '')}")
+    return filename
 
 # 示例用法（你可以在主流程里调用这个函数）
 if __name__ == '__main__':
