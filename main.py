@@ -20,6 +20,7 @@ import threading
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
+from publish_to_github import add_new_house
 
 # 加载环境变量
 load_dotenv()
@@ -41,9 +42,6 @@ class MakelaarslandProcessor:
         
         # 初始化 Twilio 客户端
         self.twilio_client = TwilioClient(self.twilio_account_sid, self.twilio_auth_token)
-        
-        # 初始化 Flask 应用
-        self.app = Flask(__name__)
         
     def check_email(self):
         """检查邮箱中的新邮件（只检测未读邮件）"""
@@ -138,11 +136,10 @@ class MakelaarslandProcessor:
         # 获取到最近火车站的距离
         house_info['nearest_station'] = self.get_nearest_station(house_info['address'])
 
-        # 生成网页
-        self.generate_webpage(house_info)
-
         # 发送WhatsApp消息
         self.send_whatsapp(house_info)
+        # 新增：自动发布到GitHub Pages
+        add_new_house(house_info)
     
     def get_house_details(self, url):
         """获取房屋详细信息（自动登录+抓取详情页所有文本和图片）"""
@@ -219,12 +216,6 @@ class MakelaarslandProcessor:
             print(f"Error getting station info: {e}")
             return None
     
-    def generate_webpage(self, house_info):
-        """注册网页路由，渲染房屋信息，不再阻塞主线程"""
-        @self.app.route('/')
-        def index():
-            return render_template('house_info.html', house_info=house_info)
-    
     def send_whatsapp(self, house_info):
         print("正在尝试发送 WhatsApp 消息...")
         print("from_参数:", f'whatsapp:{self.twilio_phone_number}')
@@ -233,20 +224,18 @@ class MakelaarslandProcessor:
         station_text = ''
         if station_info:
             station_text = f"\nNearest station: {station_info.get('station_name', '')}\nWalking time: {station_info.get('walking_time', '')}\nDistance: {station_info.get('distance', '')}"
+        # 拼接GitHub Pages链接
+        github_base_url = "https://guozc12.github.io/makelaarsland-houses/"
+        page_url = github_base_url + house_info.get('filename', '')
         message = self.twilio_client.messages.create(
             from_=f'whatsapp:{self.twilio_phone_number}',
-            body=f"New house alert!\nTitle: {house_info['title']}\nPrice: {house_info['price']}\nAddress: {house_info['address']}\nView details: http://localhost:5000{station_text}",
+            body=f"New house alert!\nTitle: {house_info['title']}\nPrice: {house_info['price']}\nAddress: {house_info['address']}\nView details: {page_url}{station_text}",
             to=f'whatsapp:{self.whatsapp_number}'
         )
         print("消息已发送，Twilio SID:", message.sid)
 
 if __name__ == "__main__":
     processor = MakelaarslandProcessor()
-    # 启动 Flask 网页线程
-    flask_thread = threading.Thread(target=processor.app.run, kwargs={'host': '0.0.0.0', 'port': 5000})
-    flask_thread.daemon = True
-    flask_thread.start()
-    # 主循环持续检测邮件
     while True:
         processor.check_email()
         print("等待10秒后再次检测...")
