@@ -198,6 +198,14 @@ class MakelaarslandProcessor:
         # 获取WOZ估值
         house_info['woz_info'] = self.get_woz_info(full_address)
 
+        # 获取移民指数
+        postcode_match = re.search(r'(\d{4})[A-Z]{2}', postcode)
+        if postcode_match:
+            postcode_prefix = postcode_match.group(1)
+            house_info['immigration_info'] = self.get_immigration_index(postcode_prefix)
+        else:
+            house_info['immigration_info'] = "<p style='margin:0;color:#666;'>Geen immigratie informatie beschikbaar</p>"
+
         # 新增：自动发布到GitHub Pages，获取filename
         filename = add_new_house(house_info)
         house_info['filename'] = filename
@@ -517,44 +525,75 @@ class MakelaarslandProcessor:
             # 先在主页面查找
             rows = driver.find_elements(By.CSS_SELECTOR, "tr.waarden-row")
             print(f"[WOZ] 主页面找到的行数: {len(rows)}")
-            # 如果主页面没找到，检查iframe
-            if len(rows) == 0:
-                iframes = driver.find_elements(By.TAG_NAME, "iframe")
-                print(f"[WOZ] 页面中的iframe数量: {len(iframes)}")
-                for idx, iframe in enumerate(iframes):
-                    driver.switch_to.frame(iframe)
-                    try:
-                        # 显式等待iframe内的动态内容
-                        rows = WebDriverWait(driver, 8).until(
-                            lambda d: d.find_elements(By.CSS_SELECTOR, "tr.waarden-row")
-                        )
-                        print(f"[WOZ] 在iframe {idx} 里找到的行数: {len(rows)}")
-                        if len(rows) > 0:
-                            break
-                    except Exception as e:
-                        print(f"[WOZ] 在iframe {idx} 等待 WOZ 行超时: {e}")
-                        rows = []
-                    finally:
-                        driver.switch_to.default_content()
             if rows:
-                woz_table_html = '<table style="width:100%;border-collapse:collapse;"><thead><tr><th>Peildatum</th><th>WOZ-waarde</th></tr></thead><tbody>'
+                woz_table_html = "<table style='width:100%;border-collapse:collapse;'><thead><tr><th>Peildatum</th><th>WOZ-waarde</th></tr></thead><tbody>"
                 for row in rows:
-                    try:
-                        date = row.find_element(By.CSS_SELECTOR, "td.wozwaarde-datum").text.strip()
-                        value = row.find_element(By.CSS_SELECTOR, "td.wozwaarde-waarde").text.strip()
-                        woz_table_html += f"<tr><td>{date}</td><td>{value}</td></tr>"
-                    except Exception as e:
-                        continue
+                    date = row.find_element(By.CSS_SELECTOR, ".wozwaarde-datum").text.strip()
+                    value = row.find_element(By.CSS_SELECTOR, ".wozwaarde-waarde").text.strip()
+                    woz_table_html += f"<tr><td>{date}</td><td>{value}</td></tr>"
                 woz_table_html += "</tbody></table>"
-                print("[WOZ] 提取到的WOZ表格HTML:\n", woz_table_html)
             else:
-                woz_table_html = "Geen WOZ informatie beschikbaar"
+                print("[WOZ] 未找到 WOZ 数据")
+                woz_table_html = "<p style='margin:0;color:#666;'>Geen WOZ informatie beschikbaar</p>"
         except Exception as e:
-            print(f"[WOZ] 查询失败: {e}")
-            woz_table_html = ""
+            print(f"[WOZ] 发生错误: {e}")
+            woz_table_html = "<p style='margin:0;color:#666;'>Geen WOZ informatie beschikbaar</p>"
         finally:
             driver.quit()
         return woz_table_html
+
+    def get_immigration_index(self, postcode):
+        """
+        从 allochtonenmeter.nl 获取移民指数数据
+        :param postcode: 邮编前4位数字
+        :return: 移民指数数据HTML字符串或空字符串
+        """
+        import requests
+        from bs4 import BeautifulSoup
+        import time
+
+        try:
+            print(f"[Immigration] 获取邮编 {postcode} 的移民数据...")
+            url = f"http://www.allochtonenmeter.nl/?postcode={postcode}"
+            response = requests.get(url)
+            response.raise_for_status()  # 检查请求是否成功
+            
+            print("[Immigration] 解析页面内容...")
+            soup = BeautifulSoup(response.text, 'html.parser')
+            
+            # 查找结果表格
+            table = soup.find('table')
+            if table:
+                print("[Immigration] 找到数据表格，开始提取...")
+                # 提取表格数据并重新格式化
+                rows = table.find_all('tr')
+                print(f"[Immigration] 找到 {len(rows)} 行数据")
+                
+                immigration_html = "<table style='width:100%;border-collapse:collapse;'>"
+                for i, row in enumerate(rows):
+                    cells = row.find_all(['td', 'th'])
+                    if cells:
+                        print(f"[Immigration] 处理第 {i+1} 行，包含 {len(cells)} 个单元格")
+                        immigration_html += "<tr>"
+                        for cell in cells:
+                            cell_text = cell.get_text(strip=True)
+                            print(f"[Immigration] 单元格内容: {cell_text}")
+                            immigration_html += f"<td>{cell_text}</td>"
+                        immigration_html += "</tr>"
+                immigration_html += "</table>"
+                print("[Immigration] 表格数据提取完成")
+            else:
+                print("[Immigration] 未找到数据表格")
+                immigration_html = "<p style='margin:0;color:#666;'>Geen immigratie informatie beschikbaar</p>"
+                
+        except Exception as e:
+            print(f"[Immigration] 发生错误: {str(e)}")
+            print(f"[Immigration] 错误类型: {type(e).__name__}")
+            import traceback
+            print(f"[Immigration] 错误堆栈: {traceback.format_exc()}")
+            immigration_html = "<p style='margin:0;color:#666;'>Geen immigratie informatie beschikbaar</p>"
+            
+        return immigration_html
 
 if __name__ == "__main__":
     processor = MakelaarslandProcessor()
