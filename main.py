@@ -132,11 +132,12 @@ class MakelaarslandProcessor:
         }
 
         # 获取房屋详细信息（文本和图片）
-        details, images, details_sections = self.get_house_details(house_info['url'])
+        details, images, details_sections, agent_info = self.get_house_details(house_info['url'])
         house_info['details'] = details
         if images:
             house_info['images'] = images
         house_info['details_sections'] = details_sections
+        house_info['agent_info'] = agent_info
 
         # 获取到最近火车站的距离
         house_info['nearest_station'] = self.get_nearest_station(house_info['address'])
@@ -156,11 +157,12 @@ class MakelaarslandProcessor:
         chromedriver_path = ChromeDriverManager().install()
         if not chromedriver_path.endswith("chromedriver.exe"):
             chromedriver_path = os.path.join(os.path.dirname(chromedriver_path), "chromedriver.exe")
-        print(f"[调试] ChromeDriver 路径: {chromedriver_path}")
+        # print(f"[调试] ChromeDriver 路径: {chromedriver_path}")
         driver = webdriver.Chrome(service=Service(chromedriver_path), options=chrome_options)
         details = ""
         images = []
         details_sections = {}
+        agent_info = {}
         try:
             # 登录 Makelaarsland
             driver.get("https://mijn.makelaarsland.nl/inloggen")
@@ -179,7 +181,7 @@ class MakelaarslandProcessor:
             # 保存完整HTML到本地文件
             with open("debug_house_detail.html", "w", encoding="utf-8") as f:
                 f.write(soup.prettify())
-            print("[调试] 已保存完整HTML到 debug_house_detail.html")
+            # print("[调试] 已保存完整HTML到 debug_house_detail.html")
             # Makelaarsland参数区块递归解析
             features_module = soup.find('div', id='featuresModule')
             if features_module:
@@ -218,9 +220,10 @@ class MakelaarslandProcessor:
             details_div = soup.find("div", class_="object-details") or soup.find("main")
             details = details_div.get_text(separator="\n", strip=True) if details_div else soup.get_text()
             # 调试输出
-            print("[调试] details_sections:", details_sections)
+            # print("[调试] details_sections:", details_sections)
             if not details_sections and details_div:
-                print("[调试] details_div HTML:", details_div.prettify()[:2000])
+                # print("[调试] details_div HTML:", details_div.prettify()[:2000])
+                pass
             # 提取所有图片链接
             links_div = soup.find("div", id="links")
             if links_div:
@@ -230,41 +233,104 @@ class MakelaarslandProcessor:
             if main_img and main_img.get("src"):
                 images.insert(0, main_img["src"])
             images = list(dict.fromkeys(images))
+            # 抓取Verkopend makelaar卡片
+            agent_card = soup.find('h3', string=lambda s: s and 'Verkopend makelaar' in s)
+            if agent_card:
+                card_div = agent_card.find_parent('div', class_='card')
+                if card_div:
+                    # 代理名
+                    name_p = card_div.find('p')
+                    agent_info['name'] = name_p.get_text(strip=True) if name_p else ''
+                    # 电话
+                    phone_a = card_div.find('a', href=lambda h: h and h.startswith('tel:'))
+                    agent_info['phone'] = phone_a.get_text(strip=True) if phone_a else ''
+                    # 邮箱
+                    email_a = card_div.find('a', href=lambda h: h and h.startswith('mailto:'))
+                    agent_info['email'] = email_a.get_text(strip=True) if email_a else ''
         except Exception as e:
+            # print(f"[调试] get_house_details agent_info error: {e}")
             print(f"Error in get_house_details: {e}")
         finally:
             driver.quit()
-        return details, images, details_sections
+        return details, images, details_sections, agent_info
     
-    def get_nearest_station(self, address):
-        """获取到最近火车站的距离"""
-        # 使用 Google Maps API 获取最近的火车站
+    def get_commute_time(self, origin, destination, mode='transit', departure_time=None):
+        """查询指定出发时间的通勤信息（默认公交，支持驾车/步行）"""
+        if departure_time is None:
+            # 默认下周二早上9点
+            from datetime import datetime, timedelta
+            today = datetime.now()
+            days_ahead = (1 - today.weekday() + 7) % 7  # 1=Tuesday
+            if days_ahead == 0:
+                days_ahead = 7
+            next_tuesday = today + timedelta(days=days_ahead)
+            commute_time = next_tuesday.replace(hour=9, minute=0, second=0, microsecond=0)
+            departure_time = int(commute_time.timestamp())
         try:
-            # 搜索最近的火车站
-            stations_result = self.gmaps.places_nearby(
-                location=self.gmaps.geocode(address)[0]['geometry']['location'],
-                keyword='train station',
-                radius=5000
+            directions = self.gmaps.directions(
+                origin,
+                destination,
+                mode=mode,
+                departure_time=departure_time,
+                region='nl',
+                language='nl'
             )
-            
-            if stations_result['results']:
-                nearest_station = stations_result['results'][0]
-                # 获取步行路线
-                directions_result = self.gmaps.directions(
-                    address,
-                    nearest_station['vicinity'],
-                    mode="walking"
-                )
-                
-                if directions_result:
-                    return {
-                        'station_name': nearest_station['name'],
-                        'walking_time': directions_result[0]['legs'][0]['duration']['text'],
-                        'distance': directions_result[0]['legs'][0]['distance']['text']
-                    }
+            if directions and len(directions) > 0:
+                leg = directions[0]['legs'][0]
+                return {
+                    'duration': leg['duration']['text'],
+                    'distance': leg['distance']['text'],
+                    'start_address': leg['start_address'],
+                    'end_address': leg['end_address'],
+                    'summary': directions[0].get('summary', ''),
+                    'mode': mode
+                }
         except Exception as e:
-            print(f"Error getting station info: {e}")
-            return None
+            # print(f"[调试] get_commute_time error: {e}")
+            print(f"[调试] get_commute_time error: {e}")
+        return None
+
+    def get_nearest_station(self, address):
+        """获取到最近火车站的距离，并查两大通勤点"""
+        # 1. 最近火车站（步行）
+        try:
+            stations = self.gmaps.places_nearby(
+                location=self.gmaps.geocode(address)[0]['geometry']['location'],
+                radius=5000,
+                type='train_station',
+                language='nl'
+            )
+            if stations['results']:
+                nearest = stations['results'][0]
+                station_name = nearest['name']
+                station_loc = nearest['geometry']['location']
+                station_addr = nearest.get('vicinity', '')
+                # 步行时间
+                walk = self.get_commute_time(address, station_name, mode='walking')
+            else:
+                station_name = ''
+                station_addr = ''
+                walk = None
+        except Exception as e:
+            # print(f"[调试] get_nearest_station error: {e}")
+            print(f"[调试] get_nearest_station error: {e}")
+            station_name = ''
+            station_addr = ''
+            walk = None
+        # 2. 到 amsterdam science park station
+        science_park = 'Science Park 904, 1098 XH Amsterdam, Netherlands'
+        commute_science = self.get_commute_time(address, science_park, mode='transit')
+        # 3. 到 Eindhoven Station
+        flux_building = 'Flux, Groene Loper 19, 5612 AP Eindhoven, Netherlands'
+        commute_flux = self.get_commute_time(address, flux_building, mode='transit')
+        return {
+            'station_name': station_name,
+            'station_addr': station_addr,
+            'walking_time': walk['duration'] if walk else '',
+            'walking_distance': walk['distance'] if walk else '',
+            'to_science_park': commute_science,
+            'to_flux': commute_flux
+        }
     
     def send_whatsapp(self, house_info):
         print("正在尝试发送 WhatsApp 消息...")
