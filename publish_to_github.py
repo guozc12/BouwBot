@@ -40,9 +40,16 @@ def render_house_page(house, filename):
 # 2. 渲染主页面
 
 def render_index_page(houses):
+    # 过滤掉不存在的房屋页面
+    valid_houses = []
+    for house in houses:
+        house_file = os.path.join(REPO_PATH, house['filename'])
+        if os.path.exists(house_file):
+            valid_houses.append(house)
+    
     with open(INDEX_TEMPLATE, encoding='utf-8') as f:
         template = Template(f.read())
-    html = template.render(houses=houses)
+    html = template.render(houses=valid_houses)
     with open(os.path.join(REPO_PATH, 'index.html'), 'w', encoding='utf-8') as f:
         f.write(html)
 
