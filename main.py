@@ -55,8 +55,8 @@ class MakelaarslandProcessor:
         mail.login(self.email, self.email_password)
         mail.select("inbox")
         
-        # 只查找发件人为 z.guo1@tue.nl 且未读的邮件
-        _, messages = mail.search(None, '(UNSEEN FROM "z.guo1@tue.nl")')
+        # 只查找发件人为 info@makelaarsland.nl 且未读的邮件
+        _, messages = mail.search(None, '(UNSEEN FROM "info@makelaarsland.nl")')
         
         for num in messages[0].split():
             _, msg = mail.fetch(num, '(RFC822)')
