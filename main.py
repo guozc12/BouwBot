@@ -153,7 +153,6 @@ class MakelaarslandProcessor:
         chrome_options.add_argument('--no-sandbox')
         chrome_options.add_argument('--disable-dev-shm-usage')
         chromedriver_path = ChromeDriverManager().install()
-        # 自动修正为 chromedriver.exe 路径
         if not chromedriver_path.endswith("chromedriver.exe"):
             chromedriver_path = os.path.join(os.path.dirname(chromedriver_path), "chromedriver.exe")
         print(f"[调试] ChromeDriver 路径: {chromedriver_path}")
@@ -179,12 +178,17 @@ class MakelaarslandProcessor:
             details_div = soup.find("div", class_="object-details") or soup.find("main")
             details = details_div.get_text(separator="\n", strip=True) if details_div else soup.get_text()
             # 提取所有图片链接
-            img_tags = soup.find_all("img")
-            for img in img_tags:
-                src = img.get("src")
-                if src and "woning" in src and src not in images:
-                    images.append(src)
-            # TODO: 如有"查看更多图片"按钮，可用 Selenium 点击后再提取
+            # 1. 隐藏大图
+            links_div = soup.find("div", id="links")
+            if links_div:
+                for a in links_div.find_all("a", href=True):
+                    images.append(a["href"])
+            # 2. 主图
+            main_img = soup.find("img", id="myHeightImage")
+            if main_img and main_img.get("src"):
+                images.insert(0, main_img["src"])
+            # 去重
+            images = list(dict.fromkeys(images))
         except Exception as e:
             print(f"Error in get_house_details: {e}")
         finally:
