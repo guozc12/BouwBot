@@ -22,9 +22,21 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from publish_to_github import add_new_house
 from selenium.webdriver.common.keys import Keys
+import logging
+import sys
 
 # 加载环境变量
 load_dotenv()
+
+# 设置日志
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler('makelaarsland.log'),
+        logging.StreamHandler(sys.stdout)
+    ]
+)
 
 class MakelaarslandProcessor:
     def __init__(self):
@@ -57,6 +69,7 @@ class MakelaarslandProcessor:
         
         # 只查找发件人为 info@makelaarsland.nl 且未读的邮件
         _, messages = mail.search(None, '(UNSEEN FROM "info@makelaarsland.nl")')
+        #_, messages = mail.search(None, '(UNSEEN FROM "z.guo1@tue.nl")')
         
         for num in messages[0].split():
             _, msg = mail.fetch(num, '(RFC822)')
@@ -624,9 +637,19 @@ class MakelaarslandProcessor:
             print(f"[Huispedia] 生成URL时发生错误: {str(e)}")
             return ""
 
-if __name__ == "__main__":
+def main():
     processor = MakelaarslandProcessor()
     while True:
-        processor.check_email()
-        print("等待10秒后再次检测...")
-        time.sleep(10) 
+        try:
+            logging.info("Starting new check cycle...")
+            processor.check_email()
+            logging.info("Check cycle completed successfully")
+            # 每10秒检查一次
+            time.sleep(10)
+        except Exception as e:
+            logging.error(f"Error occurred: {str(e)}", exc_info=True)
+            # 发生错误时等待1分钟后重试
+            time.sleep(10)
+
+if __name__ == "__main__":
+    main() 
