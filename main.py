@@ -286,9 +286,15 @@ class MakelaarslandProcessor:
                     'mode': mode
                 }
         except Exception as e:
-            # print(f"[调试] get_commute_time error: {e}")
             print(f"[调试] get_commute_time error: {e}")
-        return None
+            return {
+                'duration': 'Niet beschikbaar',
+                'distance': 'Niet beschikbaar',
+                'start_address': origin,
+                'end_address': destination,
+                'summary': '',
+                'mode': mode
+            }
 
     def get_nearest_station(self, address):
         """获取到最近火车站的距离，并查两大通勤点"""
@@ -312,17 +318,27 @@ class MakelaarslandProcessor:
                 station_addr = ''
                 walk = None
         except Exception as e:
-            # print(f"[调试] get_nearest_station error: {e}")
             print(f"[调试] get_nearest_station error: {e}")
             station_name = ''
             station_addr = ''
             walk = None
+
         # 2. 到 amsterdam science park station
-        science_park = 'Science Park 904, 1098 XH Amsterdam, Netherlands'
-        commute_science = self.get_commute_time(address, science_park, mode='transit')
+        try:
+            science_park = 'Science Park 904, 1098 XH Amsterdam, Netherlands'
+            commute_science = self.get_commute_time(address, science_park, mode='transit')
+        except Exception as e:
+            print(f"[调试] get_science_park_commute error: {e}")
+            commute_science = None
+
         # 3. 到 Eindhoven Station
-        flux_building = 'Flux, Groene Loper 19, 5612 AP Eindhoven, Netherlands'
-        commute_flux = self.get_commute_time(address, flux_building, mode='transit')
+        try:
+            flux_building = 'De Groene Loper 19, 5612 AP Eindhoven, Netherlands'
+            commute_flux = self.get_commute_time(address, flux_building, mode='transit')
+        except Exception as e:
+            print(f"[调试] get_flux_commute error: {e}")
+            commute_flux = None
+
         return {
             'station_name': station_name,
             'station_addr': station_addr,
