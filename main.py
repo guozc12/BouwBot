@@ -132,10 +132,11 @@ class MakelaarslandProcessor:
         }
 
         # 获取房屋详细信息（文本和图片）
-        details, images = self.get_house_details(house_info['url'])
+        details, images, details_sections = self.get_house_details(house_info['url'])
         house_info['details'] = details
         if images:
             house_info['images'] = images
+        house_info['details_sections'] = details_sections
 
         # 获取到最近火车站的距离
         house_info['nearest_station'] = self.get_nearest_station(house_info['address'])
@@ -147,7 +148,7 @@ class MakelaarslandProcessor:
         self.send_whatsapp(house_info)
     
     def get_house_details(self, url):
-        """获取房屋详细信息（自动登录+抓取详情页所有文本和图片）"""
+        """获取房屋详细信息（自动登录+抓取详情页所有文本和图片+结构化分组，增强兼容性+调试输出）"""
         chrome_options = Options()
         chrome_options.add_argument('--headless')
         chrome_options.add_argument('--no-sandbox')
@@ -159,6 +160,7 @@ class MakelaarslandProcessor:
         driver = webdriver.Chrome(service=Service(chromedriver_path), options=chrome_options)
         details = ""
         images = []
+        details_sections = {}
         try:
             # 登录 Makelaarsland
             driver.get("https://mijn.makelaarsland.nl/inloggen")
@@ -173,27 +175,66 @@ class MakelaarslandProcessor:
             # 访问房屋页面
             driver.get(url)
             time.sleep(3)
-            # 提取详细信息（如描述、参数等）
             soup = BeautifulSoup(driver.page_source, "html.parser")
+            # 保存完整HTML到本地文件
+            with open("debug_house_detail.html", "w", encoding="utf-8") as f:
+                f.write(soup.prettify())
+            print("[调试] 已保存完整HTML到 debug_house_detail.html")
+            # Makelaarsland参数区块递归解析
+            features_module = soup.find('div', id='featuresModule')
+            if features_module:
+                current_section = None
+                for elem in features_module.descendants:
+                    if getattr(elem, 'name', None) == 'h3':
+                        current_section = elem.get_text(strip=True)
+                        details_sections[current_section] = {}
+                    elif getattr(elem, 'name', None) == 'div' and 'row' in elem.get('class', []):
+                        key_div = elem.find('div', class_='grey')
+                        value_div = elem.find('div', class_='darkgrey')
+                        if key_div and value_div and current_section:
+                            key = key_div.get_text(strip=True)
+                            value = value_div.get_text(strip=True)
+                            details_sections[current_section][key] = value
+            # 兜底：原有h2/h3/strong+table/dl结构
+            if not details_sections:
+                for section in soup.find_all(['h2', 'h3', 'strong']):
+                    section_name = section.get_text(strip=True)
+                    table = section.find_next(['table', 'dl'])
+                    if table:
+                        group = {}
+                        for row in table.find_all('tr'):
+                            cols = row.find_all(['td', 'th'])
+                            if len(cols) == 2:
+                                key = cols[0].get_text(strip=True)
+                                value = cols[1].get_text(strip=True)
+                                group[key] = value
+                        for dt in table.find_all('dt'):
+                            dd = dt.find_next('dd')
+                            if dd:
+                                group[dt.get_text(strip=True)] = dd.get_text(strip=True)
+                        if group:
+                            details_sections[section_name] = group
+            # 兼容无结构时的纯文本
             details_div = soup.find("div", class_="object-details") or soup.find("main")
             details = details_div.get_text(separator="\n", strip=True) if details_div else soup.get_text()
+            # 调试输出
+            print("[调试] details_sections:", details_sections)
+            if not details_sections and details_div:
+                print("[调试] details_div HTML:", details_div.prettify()[:2000])
             # 提取所有图片链接
-            # 1. 隐藏大图
             links_div = soup.find("div", id="links")
             if links_div:
                 for a in links_div.find_all("a", href=True):
                     images.append(a["href"])
-            # 2. 主图
             main_img = soup.find("img", id="myHeightImage")
             if main_img and main_img.get("src"):
                 images.insert(0, main_img["src"])
-            # 去重
             images = list(dict.fromkeys(images))
         except Exception as e:
             print(f"Error in get_house_details: {e}")
         finally:
             driver.quit()
-        return details, images
+        return details, images, details_sections
     
     def get_nearest_station(self, address):
         """获取到最近火车站的距离"""
