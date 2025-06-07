@@ -33,7 +33,7 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('makelaarsland.log'),
+        logging.FileHandler('makelaarsland.log', encoding='utf-8'),
         logging.StreamHandler(sys.stdout)
     ]
 )
@@ -62,67 +62,122 @@ class MakelaarslandProcessor:
         self.twilio_client = TwilioClient(self.twilio_account_sid, self.twilio_auth_token)
         
     def check_email(self):
-        """检查邮箱中的新邮件（只检测未读邮件）"""
+        """Check for new emails (unread only)"""
+        logging.info("Starting email check...")
         mail = imaplib.IMAP4_SSL("imap.gmail.com")
         mail.login(self.email, self.email_password)
         mail.select("inbox")
         
-        # 只查找发件人为 info@makelaarsland.nl 且未读的邮件
+        # Search for unread emails from info@makelaarsland.nl
         _, messages = mail.search(None, '(UNSEEN FROM "info@makelaarsland.nl")')
-        #_, messages = mail.search(None, '(UNSEEN FROM "z.guo1@tue.nl")')
+        logging.info(f"Found {len(messages[0].split())} unread emails")
         
         for num in messages[0].split():
+            logging.info(f"Processing email #{num.decode()}")
             _, msg = mail.fetch(num, '(RFC822)')
             email_body = msg[0][1]
             email_message = email.message_from_bytes(email_body)
             
-            # 处理邮件内容
+            # Print email basic info
+            subject = decode_header(email_message["subject"])[0][0]
+            if isinstance(subject, bytes):
+                subject = subject.decode()
+            logging.info(f"Email subject: {subject}")
+            logging.info(f"From: {email_message['from']}")
+            logging.info(f"Date: {email_message['date']}")
+            
+            # Process email content
             self.process_email(email_message)
-            # 处理后标记为已读
+            # Mark as read after processing
             mail.store(num, '+FLAGS', '\\Seen')
+            logging.info(f"Email #{num.decode()} processed and marked as read")
         
         mail.close()
         mail.logout()
+        logging.info("Email check completed")
     
     def process_email(self, email_message):
-        """处理邮件内容"""
+        """Process email content"""
         subject = decode_header(email_message["subject"])[0][0]
         if isinstance(subject, bytes):
             subject = subject.decode()
+        logging.info(f"Starting to process email content: {subject}")
+            
         if email_message.is_multipart():
+            logging.info("Detected multipart email")
             for part in email_message.walk():
-                if part.get_content_type() == "text/html":
-                    payload = part.get_payload(decode=True)
-                    charset = part.get_content_charset()
-                    if charset:
-                        try:
-                            html_content = payload.decode(charset)
-                        except Exception:
-                            html_content = payload.decode('utf-8', errors='replace')
-                    else:
-                        try:
-                            html_content = payload.decode('utf-8')
-                        except Exception:
-                            html_content = payload.decode('latin1', errors='replace')
-                    self.extract_house_info(html_content)
+                content_type = part.get_content_type()
+                content_transfer_encoding = part.get('Content-Transfer-Encoding', '').lower()
+                logging.info(f"Processing email part - Type: {content_type}, Encoding: {content_transfer_encoding}")
+                
+                # Handle text/html content
+                if content_type == "text/html":
+                    try:
+                        # Get the payload
+                        payload = part.get_payload(decode=True)
+                        
+                        # Try to determine the charset
+                        charset = part.get_content_charset()
+                        logging.info(f"Detected charset: {charset}")
+                        
+                        # Decode the content based on the encoding
+                        if content_transfer_encoding == 'base64':
+                            logging.info("Detected Base64 encoded content")
+                            try:
+                                html_content = payload.decode(charset if charset else 'utf-8')
+                                logging.info("Base64 content decoded successfully")
+                            except UnicodeDecodeError:
+                                logging.warning(f"Failed to decode with charset {charset}, trying latin1")
+                                html_content = payload.decode('latin1', errors='replace')
+                        else:
+                            # For non-base64 content, try to decode with the specified charset
+                            try:
+                                html_content = payload.decode(charset if charset else 'utf-8')
+                                logging.info("Content decoded successfully")
+                            except UnicodeDecodeError:
+                                logging.warning(f"Failed to decode with charset {charset}, trying latin1")
+                                html_content = payload.decode('latin1', errors='replace')
+                        
+                        # Process the decoded HTML content
+                        logging.info("Starting to extract house information...")
+                        self.extract_house_info(html_content)
+                        logging.info("House information extraction completed")
+                        
+                    except Exception as e:
+                        logging.error(f"Error processing email part: {str(e)}")
+                        continue
+        else:
+            logging.info("Detected single part email")
+            try:
+                payload = email_message.get_payload(decode=True)
+                charset = email_message.get_content_charset()
+                logging.info(f"Single part email charset: {charset}")
+                html_content = payload.decode(charset if charset else 'utf-8')
+                self.extract_house_info(html_content)
+            except Exception as e:
+                logging.error(f"Error processing single part email: {str(e)}")
     
     def extract_house_info(self, html_content):
-        """从HTML内容中提取房屋信息"""
+        """Extract house information from HTML content"""
+        logging.info("Starting HTML content parsing...")
         soup = BeautifulSoup(html_content, 'html.parser')
 
-        # 1. 标题和详情页链接
+        # 1. Title and detail page link
         title_link = soup.find('a', href=True, string=True)
         title = title_link.text.strip() if title_link else ''
         detail_url = title_link['href'] if title_link else ''
+        logging.info(f"Extracted title: {title}")
+        logging.info(f"Detail page URL: {detail_url}")
 
-        # 2. 地址、价格、面积、房间数、经纪人
+        # 2. Address, price, size, rooms, agent
         info_text = soup.get_text()
-        # 提取街道、门牌、邮编、城市
+        logging.info("Starting address extraction...")
+        # Extract street, house number, postcode, city
         street = ''
         house_number = ''
         postcode = ''
         city = ''
-        # 匹配如"H. Diemerstraat 37, 3555GR Utrecht"
+        # Match pattern like "H. Diemerstraat 37, 3555GR Utrecht"
         m = re.search(r'([A-Za-z\.\-\'\s]+)\s(\d+[A-Za-z]?),?\s*(\d{4}[A-Z]{2})\s+([A-Za-z ]+)', info_text)
         if m:
             street = m.group(1).strip()
@@ -130,16 +185,24 @@ class MakelaarslandProcessor:
             postcode = m.group(3).strip()
             city = m.group(4).strip()
             full_address = f"{street} {house_number}, {postcode} {city}"
+            logging.info(f"Successfully matched address: {full_address}")
         else:
-            # 兜底用原有逻辑
+            logging.warning("Failed to match complete address format")
             full_address = ''
         address = full_address or (re.search(r'\d{4}[A-Z]{2} [A-Za-z ]+', info_text).group(0) if re.search(r'\d{4}[A-Z]{2} [A-Za-z ]+', info_text) else '')
+        logging.info(f"Final address: {address}")
+        
         price = re.search(r'€ [\d\.,]+ k\.k\.', info_text)
         price = price.group(0) if price else ''
+        logging.info(f"Price: {price}")
+        
         size_rooms = re.search(r'\d+ m² • \d+ m² • \d+ kamers', info_text)
         size_rooms = size_rooms.group(0) if size_rooms else ''
+        logging.info(f"Size and rooms: {size_rooms}")
+        
         agent = re.search(r'[A-Za-z ]+ Makelaardij', info_text)
         agent = agent.group(0) if agent else ''
+        logging.info(f"Agent: {agent}")
 
         # 3. 图片
         img_url = ''
@@ -429,134 +492,238 @@ class MakelaarslandProcessor:
         }
     
     def send_whatsapp(self, house_info):
-        print("正在尝试发送 WhatsApp 消息...")
-        print("from_参数:", f'whatsapp:{self.twilio_phone_number}')
-        print("收件人列表:", self.whatsapp_recipients)
-        station_info = house_info.get('nearest_station', {}) or {}
-        station_text = ''
-        if station_info:
-            station_text = f"\nNearest station: {station_info.get('station_name', '')}\nWalking time: {station_info.get('walking_time', '')}\nDistance: {station_info.get('distance', '')}"
-        github_base_url = "https://guozc12.github.io/makelaarsland-houses/"
-        page_url = github_base_url + house_info.get('filename', '')
-        body = f"New house alert!\nTitle: {house_info['title']}\nPrice: {house_info['price']}\nAddress: {house_info['address']}\nPage: {page_url}{station_text}"
-        for recipient in self.whatsapp_recipients:
-            print("to参数:", recipient)
-            message = self.twilio_client.messages.create(
-                from_=f'whatsapp:{self.twilio_phone_number}',
-                body=body,
-                to=recipient
-            )
-            print("消息已发送，Twilio SID:", message.sid, "to", recipient)
+        """Send house information via WhatsApp"""
+        logging.info("Starting WhatsApp message preparation...")
+        try:
+            # Prepare simplified message content
+            message = f"🏠 New House Alert!\n\n"
+            message += f"Title: {house_info['title']}\n"
+            message += f"Address: {house_info['address']}\n"
+            message += f"Price: {house_info['price']}\n"
+            message += f"Details: {house_info['size_rooms']}\n"
+            message += f"Agent: {house_info['agent']}\n"
+            
+            if house_info.get('nearest_station'):
+                station_info = house_info['nearest_station']
+                message += f"\n🚉 Nearest Station: {station_info.get('name', 'N/A')}\n"
+                message += f"Distance: {station_info.get('distance', 'N/A')}\n"
+                message += f"Walking Time: {station_info.get('walking_time', 'N/A')}\n"
+            
+            message += f"\n🔗 View Details: {house_info['url']}"
+            
+            logging.info(f"Message length: {len(message)} characters")
+            
+            # Send message to each recipient
+            for recipient in self.whatsapp_recipients:
+                try:
+                    logging.info(f"Sending message to: {recipient}")
+                    logging.info(f"From: whatsapp:{self.twilio_phone_number}")
+                    message = self.twilio_client.messages.create(
+                        body=message,
+                        from_=f'whatsapp:{self.twilio_phone_number}',
+                        to=recipient
+                    )
+                    logging.info(f"Message sent successfully")
+                    logging.info(f"Message SID: {message.sid}")
+                    logging.info(f"Message status: {message.status}")
+                except Exception as e:
+                    logging.error(f"Failed to send message to {recipient}: {str(e)}")
+                    continue
+                
+        except Exception as e:
+            logging.error(f"Error in WhatsApp message preparation: {str(e)}")
+            raise
 
     def get_woz_info(self, address):
-        """
-        自动从 wozwaardeloket.nl 查询房屋的 WOZ 估值。
-        :param address: 完整地址字符串
-        :return: 估值表格HTML字符串或空字符串
-        """
-        from selenium.webdriver.common.by import By
-        from selenium.webdriver.support.ui import WebDriverWait
-        from selenium.webdriver.support import expected_conditions as EC
-        import time
-        import re
-
-        def format_address(addr):
-            m = re.match(r'(.+\d+)\s*,\s*(\d{4}[A-Z]{2})\s+([A-Za-z ]+)', addr)
-            if m:
-                return f"{m.group(1).strip()}, {m.group(2).strip()} {m.group(3).strip()}"
-            print(f"[WOZ] 地址格式不正确，未包含街道和门牌: {addr}")
-            return ''
-        address = format_address(address)
-        if not address:
-            print("[WOZ] 未能生成正确的查询地址，跳过 WOZ 查询。")
-            return ''
-        print(f"[WOZ] 查询地址: {address}")
-
-        chrome_options = Options()
-        chrome_options.add_argument('--headless')
-        chrome_options.add_argument('--no-sandbox')
-        chrome_options.add_argument('--disable-dev-shm-usage')
-        chromedriver_path = ChromeDriverManager().install()
-        if not chromedriver_path.endswith("chromedriver.exe"):
-            chromedriver_path = os.path.join(os.path.dirname(chromedriver_path), "chromedriver.exe")
-        driver = webdriver.Chrome(service=Service(chromedriver_path), options=chrome_options)
-        woz_table_html = ""
+        """Get WOZ information for an address"""
+        logging.info(f"[WOZ] Querying address: {address}")
         try:
-            print("[WOZ] 打开网站...")
-            driver.get("https://www.wozwaardeloket.nl/")
-            wait = WebDriverWait(driver, 30)
+            # Initialize Chrome options
+            chrome_options = Options()
+            chrome_options.add_argument('--headless=new')
+            chrome_options.add_argument('--no-sandbox')
+            chrome_options.add_argument('--disable-dev-shm-usage')
+            chrome_options.add_argument('--disable-gpu')
+            chrome_options.add_argument('--window-size=1920,1080')
+            
+            # Initialize WebDriver with specific version
+            logging.info("[WOZ] Initializing WebDriver...")
             try:
-                print("[WOZ] 检查弹窗...")
-                modal = wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, ".modal__card")))
+                service = Service()
+                driver = webdriver.Chrome(options=chrome_options)
+                logging.info("[WOZ] WebDriver initialized successfully")
+            except Exception as e:
+                logging.error(f"[WOZ] Error initializing WebDriver: {str(e)}")
+                logging.info("[WOZ] Trying alternative WebDriver initialization...")
+                driver = webdriver.Chrome(service=Service(ChromeDriverManager(version="114.0.5735.90").install()), 
+                                       options=chrome_options)
+                logging.info("[WOZ] Alternative WebDriver initialization successful")
+            
+            try:
+                # Navigate to WOZ website
+                logging.info("[WOZ] Opening website...")
+                driver.get("https://www.wozwaardeloket.nl/")
+                logging.info(f"[WOZ] Current URL: {driver.current_url}")
+                logging.info(f"[WOZ] Page title: {driver.title}")
+                logging.info(f"[WOZ] Page source length: {len(driver.page_source)}")
+                
+                # Check for popup
+                logging.info("[WOZ] Checking for popup...")
                 try:
-                    print("[WOZ] 尝试点击 Ga verder 按钮...")
-                    ga_verder_btn = modal.find_element(By.CSS_SELECTOR, ".btn, button")
-                    ga_verder_btn.click()
-                    print("[WOZ] 已点击 Ga verder 按钮")
-                except Exception:
-                    print("[WOZ] 尝试点击右上角关闭按钮...")
-                    close_btn = modal.find_element(By.CSS_SELECTOR, "button")
-                    close_btn.click()
-                    print("[WOZ] 已点击关闭按钮")
-                wait.until(EC.invisibility_of_element_located((By.CSS_SELECTOR, ".modal__card")))
-                time.sleep(0.5)
-            except Exception as e:
-                print(f"[WOZ] 没有弹窗或弹窗处理异常: {e}")
-            # 健壮地查找输入框
-            try:
-                print("[WOZ] 等待输入框可点击...")
-                wait.until(EC.presence_of_element_located((By.TAG_NAME, "body")))
-                input_box = wait.until(EC.element_to_be_clickable((By.ID, "ggcSearchInput")))
-                input_box.click()
-                print("[WOZ] 输入框已点击")
-            except Exception as e:
-                print(f"[WOZ] 查找输入框失败: {e}")
-                with open("woz_inputbox_fail.html", "w", encoding="utf-8") as f:
-                    f.write(driver.page_source)
+                    popup = WebDriverWait(driver, 5).until(
+                        EC.presence_of_element_located((By.XPATH, "//button[contains(text(), 'Ga verder')]"))
+                    )
+                    logging.info("[WOZ] Found popup, clicking 'Ga verder' button...")
+                    popup.click()
+                    logging.info("[WOZ] Popup closed")
+                except Exception as e:
+                    logging.info(f"[WOZ] No popup found or error: {str(e)}")
+                
+                # Wait for and click the search input
+                logging.info("[WOZ] Waiting for search input...")
+                try:
+                    # Wait for page to be fully loaded
+                    WebDriverWait(driver, 10).until(
+                        lambda d: d.execute_script('return document.readyState') == 'complete'
+                    )
+                    
+                    # Check for iframes
+                    logging.info("[WOZ] Checking for iframes...")
+                    iframes = driver.find_elements(By.TAG_NAME, "iframe")
+                    logging.info(f"[WOZ] Found {len(iframes)} iframes")
+                    
+                    search_input = None
+                    if iframes:
+                        for i, iframe in enumerate(iframes):
+                            try:
+                                logging.info(f"[WOZ] Switching to iframe {i+1}")
+                                driver.switch_to.frame(iframe)
+                                
+                                # Try to find input in this iframe
+                                try:
+                                    search_input = WebDriverWait(driver, 5).until(
+                                        EC.presence_of_element_located((By.ID, "ggcSearchInput"))
+                                    )
+                                    if search_input:
+                                        logging.info(f"[WOZ] Found search input in iframe {i+1}")
+                                        break
+                                except:
+                                    logging.info(f"[WOZ] No search input found in iframe {i+1}")
+                                
+                                # Switch back to main content
+                                driver.switch_to.default_content()
+                            except Exception as e:
+                                logging.error(f"[WOZ] Error handling iframe {i+1}: {str(e)}")
+                                driver.switch_to.default_content()
+                    
+                    # If not found in iframes, try main content
+                    if not search_input:
+                        logging.info("[WOZ] Trying to find input in main content...")
+                        try:
+                            # Try JavaScript to find and click the input
+                            logging.info("[WOZ] Trying JavaScript approach...")
+                            driver.execute_script("""
+                                var input = document.getElementById('ggcSearchInput');
+                                if (input) {
+                                    input.click();
+                                    return true;
+                                }
+                                return false;
+                            """)
+                            
+                            # Now try to find the input again
+                            search_input = WebDriverWait(driver, 5).until(
+                                EC.presence_of_element_located((By.ID, "ggcSearchInput"))
+                            )
+                        except Exception as e:
+                            logging.error(f"[WOZ] Error with JavaScript approach: {str(e)}")
+                    
+                    if not search_input:
+                        raise Exception("Could not find search input")
+                    
+                    logging.info("[WOZ] Search input found, attempting to interact...")
+                    
+                    # Try multiple ways to interact with the input
+                    try:
+                        # Method 1: Direct click
+                        search_input.click()
+                    except:
+                        try:
+                            # Method 2: JavaScript click
+                            driver.execute_script("arguments[0].click();", search_input)
+                        except:
+                            try:
+                                # Method 3: JavaScript focus and send keys
+                                driver.execute_script("arguments[0].focus();", search_input)
+                            except Exception as e:
+                                logging.error(f"[WOZ] Error interacting with input: {str(e)}")
+                                raise
+                    
+                    logging.info("[WOZ] Successfully interacted with search input")
+                    
+                    # Enter address
+                    logging.info(f"[WOZ] Entering address: {address}")
+                    search_input.clear()
+                    search_input.send_keys(address)
+                    logging.info("[WOZ] Address entered")
+                    search_input.send_keys(Keys.RETURN)
+                    logging.info("[WOZ] Search submitted")
+                    
+                    # Wait for results
+                    logging.info("[WOZ] Waiting for results...")
+                    time.sleep(5)
+                    
+                    # Save page source for debugging
+                    logging.info("[WOZ] Saving page source for debugging...")
+                    with open('woz_debug.html', 'w', encoding='utf-8') as f:
+                        f.write(driver.page_source)
+                    logging.info("[WOZ] Page source saved to woz_debug.html")
+                    
+                    # Try to find WOZ value
+                    logging.info("[WOZ] Looking for WOZ value...")
+                    try:
+                        # Try multiple selectors
+                        selectors = [
+                            "tr.waarden-row",
+                            "table tr",
+                            ".wozwaarde-datum",
+                            ".wozwaarde-waarde",
+                            "table"
+                        ]
+                        
+                        for selector in selectors:
+                            logging.info(f"[WOZ] Trying selector: {selector}")
+                            elements = driver.find_elements(By.CSS_SELECTOR, selector)
+                            logging.info(f"[WOZ] Found {len(elements)} elements with selector {selector}")
+                            if elements:
+                                for i, elem in enumerate(elements):
+                                    logging.info(f"[WOZ] Element {i+1} text: {elem.text}")
+                                    logging.info(f"[WOZ] Element {i+1} HTML: {elem.get_attribute('outerHTML')}")
+                        
+                        # Try to find any table on the page
+                        tables = driver.find_elements(By.TAG_NAME, "table")
+                        logging.info(f"[WOZ] Found {len(tables)} tables on the page")
+                        for i, table in enumerate(tables):
+                            logging.info(f"[WOZ] Table {i+1} HTML: {table.get_attribute('outerHTML')}")
+                            
+                    except Exception as e:
+                        logging.error(f"[WOZ] Error finding WOZ value: {str(e)}")
+                    
+                except Exception as e:
+                    logging.error(f"[WOZ] Error finding/clicking search input: {str(e)}")
+                    logging.info("[WOZ] Available elements on page:")
+                    elements = driver.find_elements(By.TAG_NAME, "input")
+                    for elem in elements:
+                        logging.info(f"[WOZ] Input element: id={elem.get_attribute('id')}, type={elem.get_attribute('type')}")
+                    raise
+                
+            finally:
                 driver.quit()
-                return "WOZ页面结构异常，未找到输入框"
-            time.sleep(0.5)
-            input_box.clear()
-            for char in address:
-                input_box.send_keys(char)
-                time.sleep(0.05)
-            print(f"[WOZ] 地址已输入: {input_box.get_attribute('value')}")
-            time.sleep(0.5)
-            try:
-                search_button = driver.find_element(By.CSS_SELECTOR, "button[type='submit'], .search-button")
-                search_button.click()
-                print("[WOZ] 已点击搜索按钮")
-            except:
-                input_box.send_keys(Keys.ENTER)
-                print("[WOZ] 已按回车键搜索")
-            time.sleep(5)
-            print("[WOZ] 当前页面URL:", driver.current_url)
-            print("[WOZ] 页面标题:", driver.title)
-            with open("woz_debug.html", "w", encoding="utf-8") as f:
-                f.write(driver.page_source)
-            print("[WOZ] 已保存页面源码到 woz_debug.html")
-            # 直接查找 WOZ 行
-            print("[WOZ] 直接查找 WOZ 行 tr.waarden-row ...")
-            time.sleep(2)
-            # 先在主页面查找
-            rows = driver.find_elements(By.CSS_SELECTOR, "tr.waarden-row")
-            print(f"[WOZ] 主页面找到的行数: {len(rows)}")
-            if rows:
-                woz_table_html = "<table style='width:100%;border-collapse:collapse;'><thead><tr><th>Peildatum</th><th>WOZ-waarde</th></tr></thead><tbody>"
-                for row in rows:
-                    date = row.find_element(By.CSS_SELECTOR, ".wozwaarde-datum").text.strip()
-                    value = row.find_element(By.CSS_SELECTOR, ".wozwaarde-waarde").text.strip()
-                    woz_table_html += f"<tr><td>{date}</td><td>{value}</td></tr>"
-                woz_table_html += "</tbody></table>"
-            else:
-                print("[WOZ] 未找到 WOZ 数据")
-                woz_table_html = "<p style='margin:0;color:#666;'>Geen WOZ informatie beschikbaar</p>"
+                logging.info("[WOZ] WebDriver closed")
+                
         except Exception as e:
-            print(f"[WOZ] 发生错误: {e}")
-            woz_table_html = "<p style='margin:0;color:#666;'>Geen WOZ informatie beschikbaar</p>"
-        finally:
-            driver.quit()
-        return woz_table_html
+            logging.error(f"[WOZ] Error in WOZ info retrieval: {str(e)}")
+            return None
 
     def get_immigration_index(self, postcode):
         """
