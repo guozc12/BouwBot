@@ -28,4 +28,10 @@ class Config:
         return [
             r.strip() if r.strip().startswith('whatsapp:') else f'whatsapp:{r.strip()}'
             for r in recipients.split(',') if r.strip()
-        ] 
+        ]
+    
+    # 邮件收件人配置
+    @classmethod
+    def get_email_recipients(cls):
+        recipients = os.getenv('EMAIL_RECIPIENTS', '')
+        return [r.strip() for r in recipients.split(',') if r.strip()] 

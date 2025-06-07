@@ -30,6 +30,7 @@ from core.email_handler import EmailHandler
 from core.house_info import HouseInfoProcessor
 from services.maps_service import MapsService
 from services.whatsapp_service import WhatsAppService
+from services.email_service import EmailService
 from services.woz_service import WOZService
 from services.immigration_service import ImmigrationService
 from services.huispedia_service import HuispediaService
@@ -62,6 +63,11 @@ class MakelaarslandProcessor:
             self.config.TWILIO_AUTH_TOKEN,
             self.config.TWILIO_PHONE_NUMBER,
             self.config.get_whatsapp_recipients()
+        )
+        self.email_service = EmailService(
+            self.config.EMAIL,
+            self.config.EMAIL_PASSWORD,
+            self.config.get_email_recipients()
         )
         self.woz_service = WOZService()
         self.immigration_service = ImmigrationService()
@@ -117,6 +123,9 @@ class MakelaarslandProcessor:
                         
                         # 发送WhatsApp消息
                         self.whatsapp_service.send_house_info(house_info)
+                        
+                        # 发送邮件
+                        self.email_service.send_house_info(house_info)
                 
                 logger.info("Check cycle completed successfully")
                 # 每10秒检查一次
