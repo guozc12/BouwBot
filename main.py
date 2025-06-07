@@ -535,192 +535,54 @@ class MakelaarslandProcessor:
             raise
 
     def get_woz_info(self, address):
-        """Get WOZ information for an address"""
+        """Get WOZ information from walterliving.com"""
         logging.info(f"[WOZ] Querying address: {address}")
         try:
-            # Initialize Chrome options
-            chrome_options = Options()
-            chrome_options.add_argument('--headless=new')
-            chrome_options.add_argument('--no-sandbox')
-            chrome_options.add_argument('--disable-dev-shm-usage')
-            chrome_options.add_argument('--disable-gpu')
-            chrome_options.add_argument('--window-size=1920,1080')
-            
-            # Initialize WebDriver with specific version
-            logging.info("[WOZ] Initializing WebDriver...")
-            try:
-                service = Service()
-                driver = webdriver.Chrome(options=chrome_options)
-                logging.info("[WOZ] WebDriver initialized successfully")
-            except Exception as e:
-                logging.error(f"[WOZ] Error initializing WebDriver: {str(e)}")
-                logging.info("[WOZ] Trying alternative WebDriver initialization...")
-                driver = webdriver.Chrome(service=Service(ChromeDriverManager(version="114.0.5735.90").install()), 
-                                       options=chrome_options)
-                logging.info("[WOZ] Alternative WebDriver initialization successful")
-            
-            try:
-                # Navigate to WOZ website
-                logging.info("[WOZ] Opening website...")
-                driver.get("https://www.wozwaardeloket.nl/")
-                logging.info(f"[WOZ] Current URL: {driver.current_url}")
-                logging.info(f"[WOZ] Page title: {driver.title}")
-                logging.info(f"[WOZ] Page source length: {len(driver.page_source)}")
-                
-                # Check for popup
-                logging.info("[WOZ] Checking for popup...")
+            m = re.match(r'([A-Za-z\.\-\'\s]+)\s(\d+[A-Za-z]?),?\s*(\d{4}[A-Z]{2})\s+([A-Za-z ]+)', address)
+            if not m:
+                logging.error("[WOZ] Invalid address format")
+                return None
+            street = m.group(1).strip().lower().replace(' ', '-')
+            house_number = m.group(2).strip().lower()
+            city = m.group(4).strip().lower()
+            url = f"https://walterliving.com/report/{street}-{house_number}-{city}"
+            logging.info(f"[WOZ] Generated URL: {url}")
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+            }
+            response = requests.get(url, headers=headers)
+            response.raise_for_status()
+            soup = BeautifulSoup(response.text, 'html.parser')
+            woz_list = soup.find('ul', class_='group')
+            if not woz_list:
+                logging.error("[WOZ] No WOZ data found")
+                return None
+            woz_data = []
+            for item in woz_list.find_all('li', class_='timeline-events__item'):
                 try:
-                    popup = WebDriverWait(driver, 5).until(
-                        EC.presence_of_element_located((By.XPATH, "//button[contains(text(), 'Ga verder')]"))
-                    )
-                    logging.info("[WOZ] Found popup, clicking 'Ga verder' button...")
-                    popup.click()
-                    logging.info("[WOZ] Popup closed")
+                    woz_type = item.find('span', class_='timeline-events__item__type')
+                    if not woz_type or 'WOZ' not in woz_type.text:
+                        continue
+                    # 提取年份
+                    year_match = re.search(r'WOZ\s*(\d{4})', woz_type.text)
+                    year = year_match.group(1) if year_match else ''
+                    # 提取金额
+                    value_div = item.find('div', class_='timeline-events__item__content')
+                    amount_match = re.search(r'€\s*[\d\.]+', value_div.text) if value_div else None
+                    amount = amount_match.group(0) if amount_match else ''
+                    # 提取百分比
+                    percent_match = re.search(r'(\d{1,2},\d)%', value_div.text) if value_div else None
+                    percent = percent_match.group(1) + '%' if percent_match else ''
+                    if year and amount:
+                        woz_data.append(f"WOZ {year}: {amount} {f'({percent})' if percent else ''}")
                 except Exception as e:
-                    logging.info(f"[WOZ] No popup found or error: {str(e)}")
-                
-                # Wait for and click the search input
-                logging.info("[WOZ] Waiting for search input...")
-                try:
-                    # Wait for page to be fully loaded
-                    WebDriverWait(driver, 10).until(
-                        lambda d: d.execute_script('return document.readyState') == 'complete'
-                    )
-                    
-                    # Check for iframes
-                    logging.info("[WOZ] Checking for iframes...")
-                    iframes = driver.find_elements(By.TAG_NAME, "iframe")
-                    logging.info(f"[WOZ] Found {len(iframes)} iframes")
-                    
-                    search_input = None
-                    if iframes:
-                        for i, iframe in enumerate(iframes):
-                            try:
-                                logging.info(f"[WOZ] Switching to iframe {i+1}")
-                                driver.switch_to.frame(iframe)
-                                
-                                # Try to find input in this iframe
-                                try:
-                                    search_input = WebDriverWait(driver, 5).until(
-                                        EC.presence_of_element_located((By.ID, "ggcSearchInput"))
-                                    )
-                                    if search_input:
-                                        logging.info(f"[WOZ] Found search input in iframe {i+1}")
-                                        break
-                                except:
-                                    logging.info(f"[WOZ] No search input found in iframe {i+1}")
-                                
-                                # Switch back to main content
-                                driver.switch_to.default_content()
-                            except Exception as e:
-                                logging.error(f"[WOZ] Error handling iframe {i+1}: {str(e)}")
-                                driver.switch_to.default_content()
-                    
-                    # If not found in iframes, try main content
-                    if not search_input:
-                        logging.info("[WOZ] Trying to find input in main content...")
-                        try:
-                            # Try JavaScript to find and click the input
-                            logging.info("[WOZ] Trying JavaScript approach...")
-                            driver.execute_script("""
-                                var input = document.getElementById('ggcSearchInput');
-                                if (input) {
-                                    input.click();
-                                    return true;
-                                }
-                                return false;
-                            """)
-                            
-                            # Now try to find the input again
-                            search_input = WebDriverWait(driver, 5).until(
-                                EC.presence_of_element_located((By.ID, "ggcSearchInput"))
-                            )
-                        except Exception as e:
-                            logging.error(f"[WOZ] Error with JavaScript approach: {str(e)}")
-                    
-                    if not search_input:
-                        raise Exception("Could not find search input")
-                    
-                    logging.info("[WOZ] Search input found, attempting to interact...")
-                    
-                    # Try multiple ways to interact with the input
-                    try:
-                        # Method 1: Direct click
-                        search_input.click()
-                    except:
-                        try:
-                            # Method 2: JavaScript click
-                            driver.execute_script("arguments[0].click();", search_input)
-                        except:
-                            try:
-                                # Method 3: JavaScript focus and send keys
-                                driver.execute_script("arguments[0].focus();", search_input)
-                            except Exception as e:
-                                logging.error(f"[WOZ] Error interacting with input: {str(e)}")
-                                raise
-                    
-                    logging.info("[WOZ] Successfully interacted with search input")
-                    
-                    # Enter address
-                    logging.info(f"[WOZ] Entering address: {address}")
-                    search_input.clear()
-                    search_input.send_keys(address)
-                    logging.info("[WOZ] Address entered")
-                    search_input.send_keys(Keys.RETURN)
-                    logging.info("[WOZ] Search submitted")
-                    
-                    # Wait for results
-                    logging.info("[WOZ] Waiting for results...")
-                    time.sleep(5)
-                    
-                    # Save page source for debugging
-                    logging.info("[WOZ] Saving page source for debugging...")
-                    with open('woz_debug.html', 'w', encoding='utf-8') as f:
-                        f.write(driver.page_source)
-                    logging.info("[WOZ] Page source saved to woz_debug.html")
-                    
-                    # Try to find WOZ value
-                    logging.info("[WOZ] Looking for WOZ value...")
-                    try:
-                        # Try multiple selectors
-                        selectors = [
-                            "tr.waarden-row",
-                            "table tr",
-                            ".wozwaarde-datum",
-                            ".wozwaarde-waarde",
-                            "table"
-                        ]
-                        
-                        for selector in selectors:
-                            logging.info(f"[WOZ] Trying selector: {selector}")
-                            elements = driver.find_elements(By.CSS_SELECTOR, selector)
-                            logging.info(f"[WOZ] Found {len(elements)} elements with selector {selector}")
-                            if elements:
-                                for i, elem in enumerate(elements):
-                                    logging.info(f"[WOZ] Element {i+1} text: {elem.text}")
-                                    logging.info(f"[WOZ] Element {i+1} HTML: {elem.get_attribute('outerHTML')}")
-                        
-                        # Try to find any table on the page
-                        tables = driver.find_elements(By.TAG_NAME, "table")
-                        logging.info(f"[WOZ] Found {len(tables)} tables on the page")
-                        for i, table in enumerate(tables):
-                            logging.info(f"[WOZ] Table {i+1} HTML: {table.get_attribute('outerHTML')}")
-                            
-                    except Exception as e:
-                        logging.error(f"[WOZ] Error finding WOZ value: {str(e)}")
-                    
-                except Exception as e:
-                    logging.error(f"[WOZ] Error finding/clicking search input: {str(e)}")
-                    logging.info("[WOZ] Available elements on page:")
-                    elements = driver.find_elements(By.TAG_NAME, "input")
-                    for elem in elements:
-                        logging.info(f"[WOZ] Input element: id={elem.get_attribute('id')}, type={elem.get_attribute('type')}")
-                    raise
-                
-            finally:
-                driver.quit()
-                logging.info("[WOZ] WebDriver closed")
-                
+                    logging.error(f"[WOZ] Error parsing WOZ item: {str(e)}")
+                    continue
+            if not woz_data:
+                logging.error("[WOZ] No valid WOZ data found")
+                return None
+            woz_html = "<ul class='woz-data'>" + ''.join(f"<li>{row}</li>" for row in woz_data) + "</ul>"
+            return woz_html
         except Exception as e:
             logging.error(f"[WOZ] Error in WOZ info retrieval: {str(e)}")
             return None
