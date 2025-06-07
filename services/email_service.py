@@ -18,11 +18,6 @@ class EmailService:
         """发送房屋信息到邮件"""
         logger.info("Starting email message preparation...")
         try:
-            # 准备邮件内容
-            message = MIMEMultipart()
-            message['From'] = self.email
-            message['Subject'] = f"🏠 New House Alert: {house_info.title}"
-            
             # 获取GitHub Pages URL
             github_pages_url = self._get_github_pages_url(house_info)
             
@@ -61,12 +56,16 @@ class EmailService:
             </html>
             """
             
-            message.attach(MIMEText(html_content, 'html'))
-            
             # 发送邮件给每个收件人
             for recipient in self.recipients:
                 try:
+                    # Create a new message for each recipient
+                    message = MIMEMultipart()
+                    message['From'] = self.email
                     message['To'] = recipient
+                    message['Subject'] = f"🏠 New House Alert: {house_info.title}"
+                    message.attach(MIMEText(html_content, 'html'))
+                    
                     logger.info(f"Sending email to: {recipient}")
                     
                     with smtplib.SMTP_SSL('smtp.gmail.com', 465) as server:
