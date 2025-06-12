@@ -1,6 +1,6 @@
 @echo off
 :start
-python main.py
-echo Program stopped, restarting in 5 seconds...
-timeout /t 5
+call "C:\Users\%USERNAME%\anaconda3\Scripts\activate.bat" base
+start /b pythonw main.py
+timeout /t 5 /nobreak >nul
 goto start 
